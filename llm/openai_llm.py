@@ -24,4 +24,4 @@ class LLM_Model():
           # max_tokens=self.params['max_new_tokens'],
           # top_p=self.params['top_p']
         )
-        return completion.choices[0].message.conten
+        return completion.choices[0].message.content
