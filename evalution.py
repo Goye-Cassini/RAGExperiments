@@ -256,15 +256,31 @@ def evaluate(dataset, retriever, k=None, round=5, topks=[1, 5, 10, 20, 30], k_em
         print('SP_EM:', np.mean(np.array(sp_em), axis=0))
 
 
+def clean_string(s):
+    if s is not None:
+        s = s.lower()
+        s = s.rstrip(string.punctuation)
+        return s
+    return s
+
+
+def compare_strings(str1, str2):
+    cleaned_str1 = clean_string(str1)  
+    cleaned_str2 = clean_string(str2)
+    return cleaned_str1 == cleaned_str2
+
+
 def eval(prediction_file):
     with open(prediction_file) as f:
         prediction = json.load(f)
     f1s, emss = [], []
-    strict_acc, fuzzy_acc = 0, 0
+    strict_acc = 0
     for item in prediction:
+        if item['prediction'] is None:
+            item['prediction'] = ''
         f1s.append(f1_score(item['prediction'], item['answer']))
         emss.append(exact_match_score(item['prediction'], item['answer']))
-        if item['prediction'] == item['answer']:
+        if compare_strings(item['prediction'], item['answer']):
             strict_acc += 1
     print('F1:', np.mean(f1s))
     print('EM:', np.mean(emss))
@@ -274,5 +290,5 @@ def eval(prediction_file):
 if __name__ == '__main__':
     # predict_path = "./results/HotpotQA/only_qwen2-7b-instruct_dev_eval.json"
     # glod_path = "./results/HotpotQA/glod_dev.json"
-    predict_path = './dev_prediction_hybrid_256.json'
+    predict_path = './dev_prediction_hybrid_rewrite_context_d7s1.json'
     eval(predict_path)

@@ -1,19 +1,15 @@
 import os
 import json
 import csv
+import re
 from tqdm import tqdm
 from llm.openai_llm import LLM_Model
-from llama_index.core import Document
-from llama_index.core.node_parser import SentenceSplitter
-from pymilvus import (connections, utility, FieldSchema, CollectionSchema, DataType, Collection)
+from pymilvus import (connections, utility, Collection)
 from milvus_model.hybrid import BGEM3EmbeddingFunction
 from pymilvus import (
     AnnSearchRequest,
     WeightedRanker,
 )
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import concurrent.futures
-from IPython.display import Markdown, display
 
 
 def load_passages(fpath):
@@ -94,84 +90,107 @@ def genrate_response(model, question, contexts):
     Question: {question}
     Context: {context}
     '''
-    context_array = ",\n".join(contexts)
-    prompt = instruction.format(context=f"[{context_array}]", question=question)
+    contextarry = '\n'.join(contexts)
+    prompt = instruction.format(context=f"[{contextarry}]", question=question)
+    
     try:
         response = model.request(prompt)
     except Exception as e:
-        response = 'Error!'
+        print(e)
+        response = None
     return response
 
+
+def rewrite_query(model, question):
+    instruction = "Please write a passage to answer the question. Question: "
+    try:
+        response = model.request(instruction+question)
+    except Exception as e:
+        print(e)
+        response = None
+    return response
+
+
+def triplets_extract(model, question, contexts):
+    prompt = '''For following context, extract the relevant triplets (subject, predicate, object) related to the given question. 
+    1.Focus on key entities (people, groups, albums, etc.) mentioned in the question. 
+    2.Look for sentences in the context that mention these entities or provide relevant details about them. 
+    3.For each related sentence, extract a triplet in the form (subject, predicate, object) that captures relationships involving the entities.
+    4.If no relevant triplet involving the entities is found, return "No.". 
+    5.Make sure each extracted triplet clearly shows a relationship between entities in the context.
+    6.Returns results in the format of (subject, predicate, object)
+    Question: {question}
+    Context: {context}
+    Output:'''
+    contextstr = '\n'.join(contexts)
+    query = prompt.format(question=question, context=contextstr)
+    triplets = []
+    try:
+        response = model.request(query)
+        pattern = r'\(([^()]*?(?:\([^()]*\)[^()]*)*?[^()]*?), ([^()]*?(?:\([^()]*\)[^()]*)*?[^()]*?), ([^()]*?(?:\([^()]*\)[^()]*)*?[^()]*?)\)'
+        matches = re.findall(pattern, response)
+        triplets.extend(matches)
+    except Exception as e:
+        print(e)
+    return triplets
+
+
+def triplets_reasoning(model, question, triplets):
+    prompt = '''Use the provided triplets to infer and answer the following question with one or few words.
+    Question: {question}
+    Triplets: {triplets}
+    '''
+    unique_triplets = set(triplets)
+    result_string = ', '.join(str(t) for t in unique_triplets)
+    query = prompt.format(triplets=result_string, question=question)
+    try:
+        response = model.request(query)
+    except Exception as e:
+        print(e)
+        response = ''
+    return response
+
+
 model = LLM_Model('llama3.1-8b')
-connections.connect(uri="./db/milvus.db")
-# hotpotqa256_collection, hotpotqa_collection_COSINE, hotpotqa_collection
-col_name = "hotpotqa256_collection"
 
-
-# 构建索引
-# data = load_passages("/mnt/workspace/dataset/HotpotQA/corpus.jsonl")
-# documents = [Document(text=t['text'], metadata={'title': t['title']}) for t in data]
-# parser = SentenceSplitter(chunk_size=512, chunk_overlap=20)
-# nodes = parser.get_nodes_from_documents(documents, show_progress=True)
-# print("documents: ", len(documents))
-# print("node: ", len(nodes))
-# docs = [node.text for node in nodes]
-# print("doc: ", len(docs))
-
-# ef = BGEM3EmbeddingFunction(model_name="/mnt/workspace/huggingface_models/BAAI/bge-m3", use_fp16=False)
-# dense_dim = ef.dim["dense"]
-# docs_embeddings = ef(docs)
-# milvus_data = []
-# for i in range(len(docs)):
-#     milvus_data.append({
-#         "id": i,
-#         "dense_vector": docs_embeddings["dense"][i], 
-#         "sparse_vector": docs_embeddings["sparse"][i:i + 1],
-#         "text": docs[i],
-#         "title": nodes[i].metadata['title']
-#     })
-# print("milvus data: ", len(milvus_data))
-
-# fields = [
-#     FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=False),
-#     FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=3072),
-#     FieldSchema(name="sparse_vector", dtype=DataType.SPARSE_FLOAT_VECTOR),
-#     FieldSchema(name="dense_vector", dtype=DataType.FLOAT_VECTOR, dim=dense_dim),
-#     FieldSchema(name="title", dtype=DataType.VARCHAR, max_length=256),
-# ]
-# schema = CollectionSchema(fields)
-# if utility.has_collection(col_name):
-#     Collection(col_name).drop()
-# col = Collection(col_name, schema, consistency_level="Strong")
-# sparse_index = {"index_type": "SPARSE_INVERTED_INDEX", "metric_type": "IP"}
-# col.create_index("sparse_vector", sparse_index)
-# dense_index = {"index_type": "AUTOINDEX", "metric_type": "COSINE"}
-# col.create_index("dense_vector", dense_index)
-# col.load()
-# for idx in range(0, len(milvus_data), 50):
-#     col.insert(milvus_data[idx : idx + 50])
-# print("Number of entities inserted:", col.num_entities)
-
-
-# answer
 ef = BGEM3EmbeddingFunction(model_name="/mnt/workspace/huggingface_models/BAAI/bge-m3", use_fp16=False, device="cpu")
+dense_dim = ef.dim["dense"]
+
+connections.connect(uri="./db/milvus.db")
+print(utility.list_collections())
+
+# hotpotqa256_collection, hotpotqa_collection_COSINE, hotpotqa_collection
+col_name = "hotpotqa_collection_COSINE"
 col = Collection(col_name, consistency_level="Strong")
+col.load()
+print("Number of entities inserted:", col.num_entities)
+
 with open('/mnt/workspace/dataset/HotpotQA/dev.json', 'r', encoding='utf-8') as f:
     data = json.load(f)
+
 results = []
-for item in tqdm(data):
-    query_embeddings = ef([item['question']])
-    # contexts = dense_search(col, query_embeddings["dense"][0])
-    # contexts = sparse_search(col, query_embeddings["sparse"][0:1])
+for index, item in tqdm(enumerate(data), total=len(data)):
+    rewrite = rewrite_query(model, item['question'])
+    # query = None
+    query = str(rewrite) + item['question']
+    if query is not None:
+        query_embeddings = ef([query])
+    else:
+        query_embeddings = ef([item['question']])
     contexts = hybrid_search(
         col,
         query_embeddings["dense"][0],
         query_embeddings["sparse"][0:1],
-        sparse_weight=1.0,
+        sparse_weight=1,
         dense_weight=0.7,
     )
-    response = genrate_response(model, item['question'], contexts)
+    contexts.append(rewrite)
+    triplets = triplets_extract(model, item['question'], contexts)
+    # response = genrate_response(model, item['question'], contexts)
+    response = triplets_reasoning(model, item['question'], triplets)
     results.append({'question': item['question'], 'answer': item['answer'], 'prediction': response, 'level': item['level']})
+    if index < 10:
+        print(f"Question: {item['question']}\nRewrite: {query}\nResponse:{response}")
 
-with open('./dev_prediction_hybrid_256.json', 'w', encoding='utf-8') as f:
+with open('./dev_prediction_hybrid_triplets_d7s1.json', 'w', encoding='utf-8') as f:
     json.dump(results, f)
